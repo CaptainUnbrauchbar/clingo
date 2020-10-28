@@ -2726,7 +2726,7 @@ PyGetSetDef Model::tp_getset[] = {
 The id of the thread which found the model.
 )", nullptr},
     {(char *)"context", to_getter<&Model::getContext>(), nullptr, (char*)R"(
-context : SolveControl
+context: SolveControl
 
 Object that allows for controlling the running search.
 )", nullptr},
@@ -5565,7 +5565,10 @@ constexpr clingo_ast_theory_atom_definition_type_t const TheoryAtomType::values[
 constexpr const char * const TheoryAtomType::strings[];
 
 struct ScriptType : EnumType<ScriptType> {
-    enum T { Python, Lua };
+    enum T {
+        Lua = clingo_ast_script_type_lua,
+        Python = clingo_ast_script_type_python
+    };
     static constexpr char const *tp_type = "ScriptType";
     static constexpr char const *tp_name = "clingo.ast.ScriptType";
     static constexpr char const *tp_doc =
@@ -6577,11 +6580,13 @@ Object cppToPy(clingo_ast_statement_t const &stm) {
     throw std::logic_error("cannot happen");
 }
 
-// TODO: consider exposing the logger to python...
+static void logger_callback(clingo_warning_t code, char const *message, void *data);
+
 Object parseProgram(Reference args, Reference kwds) {
-    static char const *kwlist[] = {"program", "callback", nullptr};
-    Reference str, cb;
-    ParseTupleAndKeywords(args, kwds, "OO", kwlist, str, cb);
+    static char const *kwlist[] = {"program", "callback", "logger", "message_limit", nullptr};
+    Reference str, cb, pyLogger = Py_None;
+    int message_limit = 20;
+    ParseTupleAndKeywords(args, kwds, "OO|Oi", kwlist, str, cb, pyLogger, message_limit);
     using Data = std::pair<Object, std::exception_ptr>;
     Data data{cb, std::exception_ptr()};
     handle_c_error(clingo_parse_program(pyToCpp<std::string>(str).c_str(), [](clingo_ast_statement_t const *stm, void *d) -> bool {
@@ -6594,7 +6599,33 @@ Object parseProgram(Reference args, Reference kwds) {
             data.second = std::current_exception();
             return false;
         }
-    }, &data, nullptr, nullptr, 20), &data.second);
+    }, &data, !pyLogger.is_none() ? logger_callback : nullptr, pyLogger.toPy(), message_limit), &data.second);
+    return None();
+}
+
+Object parseFiles(Reference args, Reference kwds) {
+    static char const *kwlist[] = {"files", "callback", "logger", "message_limit", nullptr};
+    Reference pyFiles, cb, pyLogger = Py_None;
+    int message_limit = 20;
+    ParseTupleAndKeywords(args, kwds, "OO|Oi", kwlist, pyFiles, cb, pyLogger, message_limit);
+    using Data = std::pair<Object, std::exception_ptr>;
+    Data data{cb, std::exception_ptr()};
+    auto cppFiles = pyToCpp<std::vector<std::string>>(pyFiles);
+    std::vector<char const *> cFiles;
+    for (auto &file : cppFiles) {
+        cFiles.emplace_back(file.c_str());
+    }
+    handle_c_error(clingo_parse_files(cFiles.data(), cFiles.size(), [](clingo_ast_statement_t const *stm, void *d) -> bool {
+        auto &data = *static_cast<Data*>(d);
+        try {
+            data.first(cppToPy(*stm));
+            return true;
+        }
+        catch (...) {
+            data.second = std::current_exception();
+            return false;
+        }
+    }, &data, !pyLogger.is_none() ? logger_callback : nullptr, pyLogger.toPy(), message_limit), &data.second);
     return None();
 }
 
@@ -7959,7 +7990,7 @@ arguments : Iterable[str]
     Arguments to the grounder and solver.
 logger : Callable[[MessageCode,str],None]=None
     Function to intercept messages normally printed to standard error.
-message_limit : int
+message_limit : int=20
     The maximum number of messages passed to the logger.
 
 Notes
@@ -9750,7 +9781,7 @@ theory_term = Symbol
                ( location : Location
                , name     : str
                )
-            | TheoryTermSequence
+            | TheorySequence
                ( location : Location
                , sequence_type : TheorySequenceType
                , terms         : theory_term*
@@ -9979,7 +10010,7 @@ statement = Rule
                            , atom_type : TheoryAtomType
                            , name      : str
                            , arity     : int
-                           , elements  : str*
+                           , elements  : str
                            , guard     : TheoryGuardDefinition
 
                                           ( operators : str*
@@ -10099,6 +10130,22 @@ class Application(metaclass=ABCMeta):
         bool
         """
 
+    def print_model(self, model: Model, printer: Callable[[], None]) -> None:
+        """
+        Function to print additional information when the text output is used.
+
+        Parameters
+        ----------
+        model : model
+            The current model
+        printer : Callable[[], None]
+            The default printer as used in clingo.
+
+        Returns
+        -------
+        None
+        """
+
     def logger(self, code: MessageCode, message: str) -> None:
         """
         Function to intercept messages normally printed to standard error.
@@ -10146,7 +10193,7 @@ The following example reproduces the default clingo application:
     clingo.clingo_main(Application(sys.argv[0]), sys.argv[1:])
 )"},
     {"parse_program", to_function<parseProgram>(), METH_VARARGS | METH_KEYWORDS,
-R"(parse_program(program: str, callback: Callable[[ast.AST], None]) -> None
+R"(parse_program(program: str, callback: Callable[[ast.AST], None], logger: Callable[[MessageCode,str],None]=None, message_limit: int=20) -> None
 
 Parse the given program and return an abstract syntax tree for each statement
 via a callback.
@@ -10157,6 +10204,39 @@ program : str
     String representation of the program.
 callback : Callable[[ast.AST],None]
     Callable taking an ast as argument.
+logger : Callable[[MessageCode,str],None]=None
+    Function to intercept messages normally printed to standard error.
+message_limit : int=20
+    The maximum number of messages passed to the logger.
+
+Returns
+-------
+None
+
+See Also
+--------
+ProgramBuilder
+)"},
+    {"parse_files", to_function<parseFiles>(), METH_VARARGS | METH_KEYWORDS,
+R"(parse_files(files: Iterable[str], callback: Callable[[ast.AST], None], logger: Callable[[MessageCode,str],None]=None, message_limit: int=20) -> None
+
+Parse the programs in the given files and return an abstract syntax tree for
+each statement via a callback.
+
+The function follows clingo's handling of files on the command line. Filename
+"-" is treated as stdin and if an empty list is given, then the parser will
+read from stdin.
+
+Parameters
+----------
+files : Iterable[str]
+    List of file names.
+callback : Callable[[ast.AST],None]
+    Callable taking an ast as argument.
+logger : Callable[[MessageCode,str],None]=None
+    Function to intercept messages normally printed to standard error.
+message_limit : int=20
+    The maximum number of messages passed to the logger.
 
 Returns
 -------

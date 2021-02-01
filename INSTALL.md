@@ -34,7 +34,7 @@ branch. Releases already include the necessary generated files.
   - *at least* version 2.5
   - version 3.0 produces harmless warnings
     (to stay backwards-compatible)
-- the [re2c]() lexer generator
+- the [re2c](https://re2c.org/) lexer generator
   - *at least* version 0.13
   - version 0.13.5 is used for development
 
@@ -142,6 +142,9 @@ Python development packages are installed.
 - Variable `PYCLINGO_INSTALL_DIR` can be used to customize where to install the
   python module.
   (Default: automatically detected)
+- Variable `PYCLINGO_USE_CFFI` can be used to build and install the clingo
+  packages using Python's cffi package instead of using Python's C API.
+  (Default: `OFF`)
 
 Note that it can happen that the found Python interpreter does not match the
 found Python libraries if the development headers for the interpreter are not
